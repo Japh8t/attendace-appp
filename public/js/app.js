@@ -258,6 +258,11 @@ async function renderScanner() {
   const ctx = canvas.getContext('2d');
   let stream, raf, locked = false;
 
+  if (typeof jsQR !== 'function') {
+    statusEl.textContent = 'The QR scanning library failed to load — check your internet connection and reload the page.';
+    return;
+  }
+
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     video.srcObject = stream;
@@ -270,13 +275,19 @@ async function renderScanner() {
   }
 
   function tick() {
-    if (video.readyState === video.HAVE_ENOUGH_DATA && !locked) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const code = jsQR(img.data, img.width, img.height);
-      if (code) handleCode(code.data);
+    try {
+      if (video.readyState === video.HAVE_ENOUGH_DATA && !locked) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(img.data, img.width, img.height);
+        if (code) handleCode(code.data);
+      }
+    } catch (err) {
+      console.error('Scan loop error:', err);
+      statusEl.textContent = 'Something went wrong while scanning — reload the page to try again.';
+      return; // stop the loop instead of failing silently forever
     }
     raf = requestAnimationFrame(tick);
   }
@@ -469,7 +480,7 @@ function startLiveSession(session, course) {
     </div>
   `;
   const qrTarget = document.getElementById('qrCanvasTarget');
-  const qr = new QRCode(qrTarget, { text: ' ', width: 220, height: 220 });
+  const qr = new QRCode(qrTarget, { text: '', width: 220, height: 220 });
 
   async function refreshQr() {
     try {
@@ -559,8 +570,8 @@ async function renderAdminArea() {
         ${users
           .map(
             (u) => `<div class="list-item">
-              <div style="flex:1"><strong>${escapeHtml(u.full_name)}</strong> <span class="badge warn">${u.role}</span>
-              <div class="muted">${escapeHtml(u.email)} · ${escapeHtml(u.id_number)}</div></div>
+              <div style="flex:1"><strong>${escapeHtml(u.full_name)}</strong><span class="badge warn">${u.role}</span>
+              <div class="muted">${escapeHtml(u.email)} • ${escapeHtml(u.id_number)}</div></div>
             </div>`
           )
           .join('')}
@@ -578,3 +589,4 @@ function placeholderAvatar(name) {
 }
 
 render();
+
