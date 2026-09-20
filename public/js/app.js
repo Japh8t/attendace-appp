@@ -1,14 +1,12 @@
-// ---------- tiny app state ----------
+// ---------- tiny app state ---------
 const state = {
   token: localStorage.getItem('token') || null,
   user: JSON.parse(localStorage.getItem('user') || 'null'),
   tab: null,
 };
-
 const app = document.getElementById('app');
 const navLinks = document.getElementById('navLinks');
 const logoutBtn = document.getElementById('logoutBtn');
-
 function toast(msg, type = '') {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -16,8 +14,7 @@ function toast(msg, type = '') {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.add('hidden'), 3200);
 }
-
-// ---------- API helper ----------
+// ---------- API helper ---------
 async function api(path, { method = 'GET', body, isForm = false } = {}) {
   const headers = {};
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -31,32 +28,27 @@ async function api(path, { method = 'GET', body, isForm = false } = {}) {
   if (!res.ok) throw new Error(data.error || 'Something went wrong');
   return data;
 }
-
 function setSession(token, user) {
   state.token = token;
   state.user = user;
   localStorage.setItem('token', token);
   localStorage.setItem('user', JSON.stringify(user));
 }
-
 function clearSession() {
   state.token = null;
   state.user = null;
+}
   localStorage.removeItem('token');
   localStorage.removeItem('user');
-}
-
 logoutBtn.addEventListener('click', () => {
   clearSession();
   render();
 });
-
-// ---------- nav ----------
+// ---------- nav ---------
 function renderNav() {
   navLinks.innerHTML = '';
   logoutBtn.classList.toggle('hidden', !state.user);
   if (!state.user) return;
-
   const tabsByRole = {
     student: [['courses', 'Courses'], ['scan', 'Scan'], ['history', 'History']],
     worker: [['courses', 'Courses'], ['scan', 'Scan'], ['history', 'History']],
@@ -65,7 +57,6 @@ function renderNav() {
   };
   const tabs = tabsByRole[state.user.role] || [];
   if (!state.tab) state.tab = tabs[0]?.[0];
-
   tabs.forEach(([key, label]) => {
     const b = document.createElement('button');
     b.textContent = label;
@@ -74,11 +65,14 @@ function renderNav() {
     navLinks.appendChild(b);
   });
 }
-
-// ---------- root render ----------
+// ---------- root render ---------
 async function render() {
   renderNav();
   if (!state.user) return renderAuth();
+  const scanParams = getScanParamsFromUrl();
+  if (scanParams && (state.user.role === 'student' || state.user.role === 'worker')) {
+    return renderScanResult(scanParams);
+  }
   try {
     if (state.user.role === 'student' || state.user.role === 'worker') return renderStudentArea();
     if (state.user.role === 'lecturer') return renderLecturerArea();
@@ -87,7 +81,58 @@ async function render() {
     toast(e.message, 'err');
   }
 }
-
+// A student can mark attendance either by scanning in-app (camera + jsQR) or
+// by opening the QR code's link with their phone's own Camera app — which
+// lands them back here with ?sid=&tok=&ts= in the URL. This handles that.
+function getScanParamsFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const sid = params.get('sid');
+  const tok = params.get('tok');
+  if (!sid || !tok) return null;
+  const ts = params.get('ts');
+  return { sid: Number(sid), tok, ts: ts ? Number(ts) : undefined };
+}
+async function renderScanResult(params) {
+  // Clear the query string immediately so re-rendering (tab clicks, etc.)
+  // doesn't re-submit the same scan over and over.
+  history.replaceState({}, '', location.pathname);
+  app.innerHTML = `
+    <div class="card center">
+      <div style="font-size:2rem;"> </div>
+      <h2>Verifying…</h2>
+      <p class="muted">Marking your attendance…</p>
+    </div>
+  `;
+  try {
+    const result = await submitScan(params.sid, params.tok, params.ts);
+    app.innerHTML = `
+      <div class="card center">
+        <div style="font-size:3rem;"> </div>
+        <h2>Attendance marked</h2>
+        <p>${escapeHtml(result.course)}</p>
+        <p class="muted">${new Date(result.time).toLocaleString()}</p>
+        <button class="btn" id="backBtn">Done</button>
+      </div>`;
+    document.getElementById('backBtn').onclick = () => { state.tab = 'history'; render(); };
+  } catch (e) {
+    app.innerHTML = `
+      <div class="card center">
+        <div style="font-size:3rem;"> </div>
+        <h2>Couldn't mark attendance</h2>
+        <p class="muted">${escapeHtml(e.message)}</p>
+        <button class="btn" id="backBtn">OK</button>
+      </div>`;
+}
+  }
+    document.getElementById('backBtn').onclick = () => { state.tab = 'courses'; render(); };
+// Shared by both the in-app camera scanner and the URL-link (native Camera app) path.
+async function submitScan(sid, tok, ts) {
+  const geo = await getGeoOrNull();
+  return api('/attendance/scan', {
+    method: 'POST',
+    body: { sid, tok, ts, lat: geo?.lat, lng: geo?.lng },
+  });
+}
 // ===================== AUTH =====================
 function renderAuth() {
   app.innerHTML = `
@@ -102,7 +147,6 @@ function renderAuth() {
   document.getElementById('tabLogin').onclick = () => paintLogin(true);
   document.getElementById('tabSignup').onclick = () => paintLogin(false);
   paintLogin(true);
-
   function paintLogin(isLogin) {
     document.getElementById('tabLogin').classList.toggle('active', isLogin);
     document.getElementById('tabSignup').classList.toggle('active', !isLogin);
@@ -165,21 +209,18 @@ function renderAuth() {
     }
   }
 }
-
 // ===================== STUDENT / WORKER =====================
 async function renderStudentArea() {
   if (state.tab === 'courses') return renderStudentCourses();
+}
   if (state.tab === 'scan') return renderScanner();
   if (state.tab === 'history') return renderHistory();
-}
-
 async function renderStudentCourses() {
   app.innerHTML = `<h1>Courses</h1><p class="subtitle">Enroll and upload a clear photo of yourself — this is what your lecturer or admin will see next to your name after you scan in, so they can quickly confirm it's really you.</p><div id="list" class="card"><div class="empty">Loading…</div></div>`;
   const [all, mine] = await Promise.all([api('/courses'), api('/students/me/courses')]);
   const mineIds = new Set(mine.map((c) => c.id));
   const list = document.getElementById('list');
   if (!all.length) return (list.innerHTML = `<div class="empty">No courses available yet.</div>`);
-
   list.innerHTML = '';
   all.forEach((c) => {
     const enrolled = mineIds.has(c.id);
@@ -198,7 +239,6 @@ async function renderStudentCourses() {
     }
   });
 }
-
 function openEnrollModal(course) {
   const wrap = document.createElement('div');
   wrap.className = 'card';
@@ -218,17 +258,14 @@ function openEnrollModal(course) {
   const backdrop = document.createElement('div');
   backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:199;';
   document.body.append(backdrop, wrap);
-
   const close = () => { backdrop.remove(); wrap.remove(); };
   backdrop.onclick = close;
   wrap.querySelector('#cancelBtn').onclick = close;
-
   const input = wrap.querySelector('#photoInput');
   const preview = wrap.querySelector('#photoPreview');
   input.onchange = () => {
     if (input.files[0]) preview.src = URL.createObjectURL(input.files[0]);
   };
-
   wrap.querySelector('#enrollBtn').onclick = async () => {
     if (!input.files[0]) return toast('Please add a photo to continue', 'err');
     try {
@@ -241,7 +278,6 @@ function openEnrollModal(course) {
     } catch (e) { toast(e.message, 'err'); }
   };
 }
-
 async function renderScanner() {
   app.innerHTML = `
     <h1>Scan session QR code</h1>
@@ -251,18 +287,17 @@ async function renderScanner() {
       <div class="scanner-frame"></div>
     </div>
     <div id="scanStatus" class="center muted" style="margin-top:14px;">Requesting camera…</div>
+    <p class="muted center" style="margin-top:18px;">Camera not working here? You can also just open your phone's regular <strong>Camera app</strong> and point it at the same QR code — it'll open a link that marks your attendance automatically.</p>
   `;
   const video = document.getElementById('video');
   const statusEl = document.getElementById('scanStatus');
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   let stream, raf, locked = false;
-
   if (typeof jsQR !== 'function') {
     statusEl.textContent = 'The QR scanning library failed to load — check your internet connection and reload the page.';
     return;
   }
-
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     video.srcObject = stream;
@@ -273,7 +308,6 @@ async function renderScanner() {
     statusEl.textContent = 'Camera access denied. Please allow camera permission and reload.';
     return;
   }
-
   function tick() {
     try {
       if (video.readyState === video.HAVE_ENOUGH_DATA && !locked) {
@@ -291,25 +325,34 @@ async function renderScanner() {
     }
     raf = requestAnimationFrame(tick);
   }
-
   async function handleCode(text) {
-    let payload;
-    try { payload = JSON.parse(text); } catch { return; }
-    if (!payload.sid || !payload.tok) return;
+    let sid, tok, ts;
+    try {
+      // Preferred: a full scannable URL like https://yourapp/?sid=..&tok=..&ts=..
+      const url = new URL(text);
+      sid = Number(url.searchParams.get('sid'));
+      tok = url.searchParams.get('tok');
+      const tsParam = url.searchParams.get('ts');
+      ts = tsParam ? Number(tsParam) : undefined;
+    } catch {
+      // Fallback: older raw-JSON payload
+      try {
+        const payload = JSON.parse(text);
+        sid = payload.sid; tok = payload.tok; ts = payload.ts;
+      } catch { return; }
+    }
+    if (!sid || !tok) return;
     locked = true;
     statusEl.textContent = 'Verifying…';
     try {
-      const geo = await getGeoOrNull();
-      const result = await api('/attendance/scan', {
-        method: 'POST',
-        body: { sid: payload.sid, tok: payload.tok, ts: payload.ts, lat: geo?.lat, lng: geo?.lng },
-      });
+      const result = await submitScan(sid, tok, ts);
       stopCamera();
       app.innerHTML = `
         <div class="card center">
-          <div style="font-size:3rem;">✅</div>
+          <div style="font-size:3rem;">
           <h2>Attendance marked</h2>
           <p>${escapeHtml(result.course)}</p>
+</div>
           <p class="muted">${new Date(result.time).toLocaleString()}</p>
           <button class="btn" id="backBtn">Done</button>
         </div>`;
@@ -320,16 +363,13 @@ async function renderScanner() {
       setTimeout(() => (locked = false), 1500);
     }
   }
-
   function stopCamera() {
     cancelAnimationFrame(raf);
     stream?.getTracks().forEach((t) => t.stop());
   }
-
   // stop camera if user navigates away
   window.addEventListener('hashchange', stopCamera, { once: true });
 }
-
 function getGeoOrNull() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
@@ -340,7 +380,6 @@ function getGeoOrNull() {
     );
   });
 }
-
 async function renderHistory() {
   app.innerHTML = `<h1>My attendance history</h1><div id="list" class="card"><div class="empty">Loading…</div></div>`;
   const rows = await api('/students/me/attendance');
@@ -355,14 +394,12 @@ async function renderHistory() {
     )
     .join('');
 }
-
 // ===================== LECTURER =====================
 async function renderLecturerArea() {
   if (state.tab === 'courses') return renderLecturerCourses();
   if (state.tab === 'session') return renderLecturerSession();
   if (state.tab === 'reports') return renderLecturerReports();
 }
-
 async function renderLecturerCourses() {
   app.innerHTML = `
     <h1>My courses</h1>
@@ -386,11 +423,9 @@ async function renderLecturerCourses() {
       renderLecturerCourses();
     } catch (e) { toast(e.message, 'err'); }
   };
-
   const courses = await api('/courses');
   const list = document.getElementById('list');
   if (!courses.length) return (list.innerHTML = `<div class="card empty">No courses yet — create one above.</div>`);
-
   for (const c of courses) {
     const card = document.createElement('div');
     card.className = 'card';
@@ -413,9 +448,7 @@ async function renderLecturerCourses() {
     });
   }
 }
-
 let sessionPoll = null;
-
 async function renderLecturerSession() {
   clearInterval(sessionPoll);
   const courses = await api('/courses');
@@ -459,7 +492,6 @@ async function renderLecturerSession() {
     } catch (e) { toast(e.message, 'err'); }
   };
 }
-
 function startLiveSession(session, course) {
   document.getElementById('setupCard').classList.add('hidden');
   const live = document.getElementById('liveArea');
@@ -471,6 +503,7 @@ function startLiveSession(session, course) {
         <div class="countdown" id="refreshCountdown">--</div>
         <div class="countdown-label">seconds until code refreshes</div>
       </div>
+      <p class="muted center" style="font-size:0.8rem;">Students can scan this with the app's Scan tab, or just their phone's regular Camera app.</p>
       <p class="muted" id="sessionCountdown"></p>
       <button class="btn danger" id="endBtn">End session</button>
     </div>
@@ -480,13 +513,16 @@ function startLiveSession(session, course) {
     </div>
   `;
   const qrTarget = document.getElementById('qrCanvasTarget');
-  const qr = new QRCode(qrTarget, { text: '', width: 220, height: 220 });
-
+  const qr = new QRCode(qrTarget, { text: ' ', width: 220, height: 220 });
   async function refreshQr() {
     try {
       const data = await api(`/sessions/${session.id}/qr-payload`);
+      const obj = JSON.parse(data.payload);
+      // Encode a real, clickable link — so students can scan it with their
+      // phone's own Camera app, with no dependency on this page's JS at all.
+      const scanUrl = `${window.location.origin}/?sid=${obj.sid}&tok=${encodeURIComponent(obj.tok)}&ts=${obj.ts}`;
       qr.clear();
-      qr.makeCode(data.payload);
+      qr.makeCode(scanUrl);
       let secs = data.refreshInSec;
       document.getElementById('refreshCountdown').textContent = secs;
       document.getElementById('sessionCountdown').textContent =
@@ -504,7 +540,6 @@ function startLiveSession(session, course) {
   }
   refreshQr();
   const qrInterval = setInterval(refreshQr, 15000);
-
   async function refreshList() {
     const rows = await api(`/sessions/${session.id}/attendance`);
     document.getElementById('scanCount').textContent = rows.length;
@@ -522,7 +557,6 @@ function startLiveSession(session, course) {
   }
   refreshList();
   sessionPoll = setInterval(refreshList, 3000);
-
   document.getElementById('endBtn').onclick = async () => {
     await api(`/sessions/${session.id}/end`, { method: 'POST' });
     clearInterval(qrInterval);
@@ -530,9 +564,8 @@ function startLiveSession(session, course) {
     clearInterval(sessionPoll);
     toast('Session ended', 'ok');
     renderLecturerSession();
-  };
 }
-
+  };
 async function renderLecturerReports() {
   const courses = await api('/courses');
   app.innerHTML = `
@@ -553,7 +586,6 @@ async function renderLecturerReports() {
     )
     .join('');
 }
-
 // ===================== ADMIN =====================
 async function renderAdminArea() {
   const [overview, users] = await Promise.all([api('/admin/overview'), api('/admin/users')]);
@@ -570,23 +602,20 @@ async function renderAdminArea() {
         ${users
           .map(
             (u) => `<div class="list-item">
-              <div style="flex:1"><strong>${escapeHtml(u.full_name)}</strong><span class="badge warn">${u.role}</span>
-              <div class="muted">${escapeHtml(u.email)} • ${escapeHtml(u.id_number)}</div></div>
+              <div style="flex:1"><strong>${escapeHtml(u.full_name)}</strong> <span class="badge warn">${u.role}</span>
+              <div class="muted">${escapeHtml(u.email)} · ${escapeHtml(u.id_number)}</div></div>
             </div>`
           )
           .join('')}
       </div>
     </div>
-  `;
 }
-
-// ---------- utils ----------
+  `;
+// ---------- utils ---------
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 function placeholderAvatar(name) {
   return `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name || '?')}`;
 }
-
 render();
-
