@@ -79,6 +79,12 @@ function renderNav() {
 async function render() {
   renderNav();
   if (!state.user) return renderAuth();
+
+  const scanParams = getScanParamsFromUrl();
+  if (scanParams && (state.user.role === 'student' || state.user.role === 'worker')) {
+    return renderScanResult(scanParams);
+  }
+
   try {
     if (state.user.role === 'student' || state.user.role === 'worker') return renderStudentArea();
     if (state.user.role === 'lecturer') return renderLecturerArea();
@@ -86,6 +92,61 @@ async function render() {
   } catch (e) {
     toast(e.message, 'err');
   }
+}
+
+// A student can mark attendance either by scanning in-app (camera + jsQR) or
+// by opening the QR code's link with their phone's own Camera app — which
+// lands them back here with ?s=&t=&e= in the URL. This handles that.
+function getScanParamsFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const sid = params.get('s');
+  const tok = params.get('t');
+  if (!sid || !tok) return null;
+  const ts = params.get('e');
+  return { sid: Number(sid), tok, ts: ts ? Number(ts) : undefined };
+}
+
+async function renderScanResult(params) {
+  // Clear the query string immediately so re-rendering (tab clicks, etc.)
+  // doesn't re-submit the same scan over and over.
+  history.replaceState({}, '', location.pathname);
+  app.innerHTML = `
+    <div class="card center">
+      <div style="font-size:2rem;">⏳</div>
+      <h2>Verifying…</h2>
+      <p class="muted">Marking your attendance…</p>
+    </div>
+  `;
+  try {
+    const result = await submitScan(params.sid, params.tok, params.ts);
+    app.innerHTML = `
+      <div class="card center">
+        <div style="font-size:3rem;">✅</div>
+        <h2>Attendance marked</h2>
+        <p>${escapeHtml(result.course)}</p>
+        <p class="muted">${new Date(result.time).toLocaleString()}</p>
+        <button class="btn" id="backBtn">Done</button>
+      </div>`;
+    document.getElementById('backBtn').onclick = () => { state.tab = 'history'; render(); };
+  } catch (e) {
+    app.innerHTML = `
+      <div class="card center">
+        <div style="font-size:3rem;">⚠️</div>
+        <h2>Couldn't mark attendance</h2>
+        <p class="muted">${escapeHtml(e.message)}</p>
+        <button class="btn" id="backBtn">OK</button>
+      </div>`;
+    document.getElementById('backBtn').onclick = () => { state.tab = 'courses'; render(); };
+  }
+}
+
+// Shared by both the in-app camera scanner and the URL-link (native Camera app) path.
+async function submitScan(sid, tok, ts) {
+  const geo = await getGeoOrNull();
+  return api('/attendance/scan', {
+    method: 'POST',
+    body: { sid, tok, ts, lat: geo?.lat, lng: geo?.lng },
+  });
 }
 
 // ===================== AUTH =====================
@@ -251,12 +312,18 @@ async function renderScanner() {
       <div class="scanner-frame"></div>
     </div>
     <div id="scanStatus" class="center muted" style="margin-top:14px;">Requesting camera…</div>
+    <p class="muted center" style="margin-top:18px;">Camera not working here? You can also just open your phone's regular <strong>Camera app</strong> and point it at the same QR code — it'll open a link that marks your attendance automatically.</p>
   `;
   const video = document.getElementById('video');
   const statusEl = document.getElementById('scanStatus');
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   let stream, raf, locked = false;
+
+  if (typeof jsQR !== 'function') {
+    statusEl.textContent = 'The QR scanning library failed to load — check your internet connection and reload the page.';
+    return;
+  }
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
@@ -270,29 +337,44 @@ async function renderScanner() {
   }
 
   function tick() {
-    if (video.readyState === video.HAVE_ENOUGH_DATA && !locked) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const code = jsQR(img.data, img.width, img.height);
-      if (code) handleCode(code.data);
+    try {
+      if (video.readyState === video.HAVE_ENOUGH_DATA && !locked) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(img.data, img.width, img.height);
+        if (code) handleCode(code.data);
+      }
+    } catch (err) {
+      console.error('Scan loop error:', err);
+      statusEl.textContent = 'Something went wrong while scanning — reload the page to try again.';
+      return; // stop the loop instead of failing silently forever
     }
     raf = requestAnimationFrame(tick);
   }
 
   async function handleCode(text) {
-    let payload;
-    try { payload = JSON.parse(text); } catch { return; }
-    if (!payload.sid || !payload.tok) return;
+    let sid, tok, ts;
+    try {
+      // Preferred: a full scannable URL like https://yourapp/?s=..&t=..&e=..
+      const url = new URL(text);
+      sid = Number(url.searchParams.get('s'));
+      tok = url.searchParams.get('t');
+      const tsParam = url.searchParams.get('e');
+      ts = tsParam ? Number(tsParam) : undefined;
+    } catch {
+      // Fallback: older raw-JSON payload
+      try {
+        const payload = JSON.parse(text);
+        sid = payload.sid; tok = payload.tok; ts = payload.ts;
+      } catch { return; }
+    }
+    if (!sid || !tok) return;
     locked = true;
     statusEl.textContent = 'Verifying…';
     try {
-      const geo = await getGeoOrNull();
-      const result = await api('/attendance/scan', {
-        method: 'POST',
-        body: { sid: payload.sid, tok: payload.tok, ts: payload.ts, lat: geo?.lat, lng: geo?.lng },
-      });
+      const result = await submitScan(sid, tok, ts);
       stopCamera();
       app.innerHTML = `
         <div class="card center">
@@ -460,6 +542,11 @@ function startLiveSession(session, course) {
         <div class="countdown" id="refreshCountdown">--</div>
         <div class="countdown-label">seconds until code refreshes</div>
       </div>
+      <p class="muted center" style="font-size:0.8rem;">Students can scan this with the app's Scan tab, their phone's regular Camera app, or just tap/type the link below.</p>
+      <div class="row" style="margin-top:10px;">
+        <input id="directLinkInput" readonly style="font-size:0.75rem;text-align:center;" />
+        <button class="btn small secondary" id="copyLinkBtn" style="margin-top:0;">Copy link</button>
+      </div>
       <p class="muted" id="sessionCountdown"></p>
       <button class="btn danger" id="endBtn">End session</button>
     </div>
@@ -469,13 +556,24 @@ function startLiveSession(session, course) {
     </div>
   `;
   const qrTarget = document.getElementById('qrCanvasTarget');
-  const qr = new QRCode(qrTarget, { text: ' ', width: 220, height: 220 });
+  // width/height are generous, and CorrectLevel.L keeps the code as visually
+  // simple as possible — both make it much easier for a phone camera to read
+  // when it's photographing another screen (glare, slight blur, etc.).
+  const qr = new QRCode(qrTarget, { text: ' ', width: 280, height: 280, correctLevel: QRCode.CorrectLevel.L });
 
   async function refreshQr() {
     try {
       const data = await api(`/sessions/${session.id}/qr-payload`);
+      const obj = JSON.parse(data.payload);
+      // Encode a real, clickable link — so students can scan it with their
+      // phone's own Camera app, with no dependency on this page's JS at all.
+      // Short param names (s/t/e) keep the URL — and so the QR code — as
+      // small and easy to scan as possible.
+      const scanUrl = `${window.location.origin}/?s=${obj.sid}&t=${encodeURIComponent(obj.tok)}&e=${obj.ts}`;
       qr.clear();
-      qr.makeCode(data.payload);
+      qr.makeCode(scanUrl);
+      const linkInput = document.getElementById('directLinkInput');
+      if (linkInput) linkInput.value = scanUrl;
       let secs = data.refreshInSec;
       document.getElementById('refreshCountdown').textContent = secs;
       document.getElementById('sessionCountdown').textContent =
@@ -493,6 +591,17 @@ function startLiveSession(session, course) {
   }
   refreshQr();
   const qrInterval = setInterval(refreshQr, 15000);
+
+  document.getElementById('copyLinkBtn').onclick = async () => {
+    const input = document.getElementById('directLinkInput');
+    input.select();
+    try {
+      await navigator.clipboard.writeText(input.value);
+      toast('Link copied — share it with your students', 'ok');
+    } catch {
+      toast('Could not copy automatically — select the text and copy manually', 'err');
+    }
+  };
 
   async function refreshList() {
     const rows = await api(`/sessions/${session.id}/attendance`);
@@ -576,5 +685,5 @@ function escapeHtml(s) {
 function placeholderAvatar(name) {
   return `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name || '?')}`;
 }
-
+render();
 render();
