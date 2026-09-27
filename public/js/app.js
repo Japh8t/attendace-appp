@@ -596,7 +596,7 @@ function startLiveSession(session, course) {
     }
   }
   refreshQr();
-  const qrInterval = setInterval(refreshQr, 15000);
+  const qrInterval = setInterval(refreshQr, 30000);
 
   document.getElementById('copyLinkBtn').onclick = async () => {
     const input = document.getElementById('directLinkInput');
