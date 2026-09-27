@@ -22,7 +22,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me-in-production';
-const QR_INTERVAL_SEC = 15; // QR token refreshes every 15 seconds
+const QR_INTERVAL_SEC = 30; // QR token refreshes every 15 seconds
 
 // ---------- storage dirs ----------
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
